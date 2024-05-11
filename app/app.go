@@ -29,8 +29,6 @@ type TLSConfig struct {
 	KeyPath  string
 	CertPath string
 }
-type CorsConfig struct {
-}
 type AppOptions struct {
 	// if nil not run tls
 	tls *TLSConfig
@@ -49,11 +47,13 @@ func WithTLSConfig(c *TLSConfig) AppOption {
 		aos.tls = c
 	}
 }
+
 func WithPort(p int) AppOption {
 	return func(aos *AppOptions) {
 		aos.port = &p
 	}
 }
+
 func WihtGrpcWeb(open bool) AppOption {
 	return func(aos *AppOptions) {
 		aos.enableGRPCWeb = open
@@ -93,6 +93,7 @@ func New(options ...AppOption) *App {
 	reflection.Register(a.rpc)
 	return a
 }
+
 func (a *App) listenTLS() {
 	cert, err := tls.LoadX509KeyPair(a.options.tls.CertPath, a.options.tls.KeyPath)
 	if err != nil {
@@ -104,6 +105,7 @@ func (a *App) listenTLS() {
 		panic(err)
 	}
 }
+
 func (a *App) listenTCP() {
 	var err error
 	a.onlyTCP, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *a.options.port))
@@ -111,6 +113,7 @@ func (a *App) listenTCP() {
 		panic(err)
 	}
 }
+
 func (a *App) listens() {
 	slog.Info("init listens")
 	var err error
@@ -119,6 +122,7 @@ func (a *App) listens() {
 	}
 	if a.options.port != nil && a.options.tls != nil {
 		if *a.options.port == a.options.tls.Port {
+			slog.Info("both tcp tls")
 			a.bothTCPTLS, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *a.options.port))
 			if err != nil {
 				panic(err)
@@ -135,13 +139,15 @@ func (a *App) listens() {
 	if a.options.tls != nil {
 		a.listenTLS()
 	}
-
 }
+
 func (a *App) startServe(l net.Listener) {
 	slog.Info(" server ", "listen", l.Addr())
 	m := cmux.New(l)
 	httpL := m.Match(cmux.HTTP1Fast())
-	grpcL := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"))
+	grpcL := m.MatchWithWriters(
+		cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"),
+	)
 	a.wg.Add(3)
 	go func() {
 		defer a.wg.Done()
@@ -165,34 +171,58 @@ func (a *App) startServe(l net.Listener) {
 	}()
 	a.mList = append(a.mList, m)
 }
+
 func (a *App) start() {
 	slog.Info("mux ")
 	if a.bothTCPTLS != nil {
 		m := cmux.New(a.bothTCPTLS)
-		grpcL := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"))
+		grpcL := m.MatchWithWriters(
+			cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"),
+		)
 		httpL := m.Match(cmux.HTTP1Fast())
+
 		other := m.Match(cmux.Any())
-		a.wg.Add(3)
-		go func() {
-			defer a.wg.Done()
-			a.h1.Serve(grpcL)
-		}()
-		go func() {
-			defer a.wg.Done()
-			a.rpc.Serve(httpL)
-		}()
-		go func() {
-			defer a.wg.Done()
-			m.Serve()
-		}()
-		a.mList = append(a.mList, m)
+		// load tls file
 		cert, err := tls.LoadX509KeyPair(a.options.tls.CertPath, a.options.tls.KeyPath)
 		if err != nil {
 			panic(err)
 		}
 		cfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 		tlsL := tls.NewListener(other, cfg)
-		a.startServe(tlsL)
+		tlsm := cmux.New(tlsL)
+
+		grpcsL := tlsm.MatchWithWriters(
+			cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"),
+		)
+		httpsL := tlsm.Match(cmux.HTTP1Fast())
+
+		a.wg.Add(6)
+		go func() {
+			defer a.wg.Done()
+			a.h1.Serve(httpL)
+		}()
+		go func() {
+			defer a.wg.Done()
+			a.rpc.Serve(grpcL)
+		}()
+		go func() {
+			defer a.wg.Done()
+			a.h1.Serve(httpsL)
+		}()
+		go func() {
+			defer a.wg.Done()
+			a.rpc.Serve(grpcsL)
+		}()
+		go func() {
+			defer a.wg.Done()
+			tlsm.Serve()
+		}()
+		go func() {
+			defer a.wg.Done()
+			m.Serve()
+		}()
+
+		a.mList = append(a.mList, tlsm, m)
 		return
 	}
 	if a.onlyTCP != nil {
@@ -201,8 +231,8 @@ func (a *App) start() {
 	if a.onlyTLS != nil {
 		a.startServe(a.onlyTLS)
 	}
-
 }
+
 func (a *App) Run() {
 	slog.Info("start server")
 	a.listens()
@@ -212,16 +242,14 @@ func (a *App) Run() {
 	// wait sign to exit
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
-	for range ch {
-		a.h1.Shutdown(context.Background())
-		a.rpc.GracefulStop()
-		for _, v := range a.mList {
-			v.Close()
-		}
-		slog.Info("finish server")
-		a.wg.Wait()
-		return
+	<-ch
+	a.h1.Shutdown(context.Background())
+	a.rpc.GracefulStop()
+	for _, v := range a.mList {
+		v.Close()
 	}
+	slog.Info("finish server")
+	a.wg.Wait()
 
 }
 
@@ -248,15 +276,30 @@ func (a *App) loadH1Handler() {
 	if a.options.corsOptions != nil {
 		hander = cors.New(*a.options.corsOptions).Handler(hander)
 	}
-	// log metric trace recovery  hander
-	n := negroni.Classic()
+	// recovery log metric hander
+	n := negroni.New(negroni.NewRecovery(), negroni.NewLogger())
 	p := negroniprometheus.NewMiddleware("app")
 	n = n.With(p)
 	n.UseHandler(hander)
 	a.h1.Handler = n
-	a.httpmux.Handle("/metrics", promhttp.Handler())
+	a.httpmux.Handle("GET /metrics", promhttp.Handler())
+
 }
 
-func (a *App) Get(path string, h http.Handler) {
-	a.httpmux.Handle(path, h)
+func (a *App) GET(path string, h http.Handler) {
+	a.httpmux.Handle("GET "+path, h)
+}
+
+func (a *App) POST(path string, h http.Handler) {
+	a.httpmux.Handle("POST "+path, h)
+}
+
+func (a *App) PUT(path string, h http.Handler) {
+	a.httpmux.Handle("PUT "+path, h)
+}
+func (a *App) DELETE(path string, h http.Handler) {
+	a.httpmux.Handle("DELETE "+path, h)
+}
+func (a *App) HEAD(path string, h http.Handler) {
+	a.httpmux.Handle("HEAD "+path, h)
 }
