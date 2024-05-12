@@ -11,9 +11,12 @@ import (
 
 func main() {
 	a := app.New(
-		app.WithPort(7890),
+		app.WithAddr("0.0.0.0", 7788),
 		app.WithTLSConfig(&app.TLSConfig{
-			Port:     7890,
+			Addr: app.Addr{
+				Port: 7890,
+				IP:   "0.0.0.0",
+			},
 			KeyPath:  "./key.pem",
 			CertPath: "./cert.pem",
 		}),
@@ -22,6 +25,7 @@ func main() {
 			AllowedHeaders: []string{"*"},
 			AllowedMethods: []string{"*"},
 		}),
+		app.WithPromAddr("127.0.0.1", 7789),
 	)
 	a.GET("/hello", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "hello")

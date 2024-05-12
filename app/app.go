@@ -24,33 +24,51 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+type Addr struct {
+	IP   string
+	Port int
+}
+
+func (a *Addr) String() string {
+	return fmt.Sprintf("%s:%d", a.IP, a.Port)
+}
+
 type TLSConfig struct {
-	Port     int
+	Addr
 	KeyPath  string
 	CertPath string
 }
+
 type AppOptions struct {
 	// if nil not run tls
-	tls *TLSConfig
+	httptls *TLSConfig
 	// if nil not run tcp // if Port == TLS.Port port run on same port
-	port *int
+	http *Addr
 	//
 	enableGRPCWeb bool
 
 	corsOptions *cors.Options
+
+	prom *Addr
 }
 
 type AppOption func(aos *AppOptions)
 
 func WithTLSConfig(c *TLSConfig) AppOption {
 	return func(aos *AppOptions) {
-		aos.tls = c
+		aos.httptls = c
 	}
 }
 
-func WithPort(p int) AppOption {
+func WithAddr(ip string, p int) AppOption {
 	return func(aos *AppOptions) {
-		aos.port = &p
+		aos.http = &Addr{IP: ip, Port: p}
+	}
+}
+
+func WithPromAddr(ip string, p int) AppOption {
+	return func(aos *AppOptions) {
+		aos.prom = &Addr{IP: ip, Port: p}
 	}
 }
 
@@ -95,12 +113,16 @@ func New(options ...AppOption) *App {
 }
 
 func (a *App) listenTLS() {
-	cert, err := tls.LoadX509KeyPair(a.options.tls.CertPath, a.options.tls.KeyPath)
+	cert, err := tls.LoadX509KeyPair(a.options.httptls.CertPath, a.options.httptls.KeyPath)
 	if err != nil {
 		panic(err)
 	}
 	cfg := &tls.Config{Certificates: []tls.Certificate{cert}}
-	a.onlyTLS, err = tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", a.options.tls.Port), cfg)
+	a.onlyTLS, err = tls.Listen(
+		"tcp",
+		a.options.httptls.String(),
+		cfg,
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -108,7 +130,7 @@ func (a *App) listenTLS() {
 
 func (a *App) listenTCP() {
 	var err error
-	a.onlyTCP, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *a.options.port))
+	a.onlyTCP, err = net.Listen("tcp", a.options.http.String())
 	if err != nil {
 		panic(err)
 	}
@@ -117,13 +139,16 @@ func (a *App) listenTCP() {
 func (a *App) listens() {
 	slog.Info("init listens")
 	var err error
-	if a.options.port == nil && a.options.tls == nil {
+	if a.options.http == nil && a.options.httptls == nil {
 		panic("need listen port")
 	}
-	if a.options.port != nil && a.options.tls != nil {
-		if *a.options.port == a.options.tls.Port {
+	if a.options.http != nil && a.options.httptls != nil {
+		if a.options.http.Port == a.options.httptls.Port {
 			slog.Info("both tcp tls")
-			a.bothTCPTLS, err = net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *a.options.port))
+			a.bothTCPTLS, err = net.Listen(
+				"tcp",
+				a.options.http.String(),
+			)
 			if err != nil {
 				panic(err)
 			}
@@ -133,10 +158,10 @@ func (a *App) listens() {
 		}
 		return
 	}
-	if a.options.port != nil {
+	if a.options.http != nil {
 		a.listenTCP()
 	}
-	if a.options.tls != nil {
+	if a.options.httptls != nil {
 		a.listenTLS()
 	}
 }
@@ -183,7 +208,7 @@ func (a *App) start() {
 
 		other := m.Match(cmux.Any())
 		// load tls file
-		cert, err := tls.LoadX509KeyPair(a.options.tls.CertPath, a.options.tls.KeyPath)
+		cert, err := tls.LoadX509KeyPair(a.options.httptls.CertPath, a.options.httptls.KeyPath)
 		if err != nil {
 			panic(err)
 		}
@@ -233,12 +258,24 @@ func (a *App) start() {
 	}
 }
 
+func (a *App) runProm() {
+	if a.options.prom != nil {
+		met := http.NewServeMux()
+		met.Handle("GET /metrics", promhttp.Handler())
+		go func() {
+			if err := http.ListenAndServe(a.options.prom.String(), met); err != nil {
+				slog.Error("run metrics server error", "error", err)
+			}
+		}()
+	}
+}
+
 func (a *App) Run() {
 	slog.Info("start server")
 	a.listens()
 	a.loadH1Handler()
 	a.start()
-
+	a.runProm()
 	// wait sign to exit
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
@@ -250,7 +287,6 @@ func (a *App) Run() {
 	}
 	slog.Info("finish server")
 	a.wg.Wait()
-
 }
 
 func (a *App) RegisteGrpcService(desc *grpc.ServiceDesc, s any) {
@@ -282,8 +318,6 @@ func (a *App) loadH1Handler() {
 	n = n.With(p)
 	n.UseHandler(hander)
 	a.h1.Handler = n
-	a.httpmux.Handle("GET /metrics", promhttp.Handler())
-
 }
 
 func (a *App) GET(path string, h http.Handler) {
@@ -297,9 +331,11 @@ func (a *App) POST(path string, h http.Handler) {
 func (a *App) PUT(path string, h http.Handler) {
 	a.httpmux.Handle("PUT "+path, h)
 }
+
 func (a *App) DELETE(path string, h http.Handler) {
 	a.httpmux.Handle("DELETE "+path, h)
 }
+
 func (a *App) HEAD(path string, h http.Handler) {
 	a.httpmux.Handle("HEAD "+path, h)
 }
