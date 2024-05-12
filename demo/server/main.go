@@ -26,6 +26,7 @@ func main() {
 			AllowedMethods: []string{"*"},
 		}),
 		app.WithPromAddr("127.0.0.1", 7789),
+		app.WihtGrpcWeb(true),
 	)
 	a.GET("/hello", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "hello")

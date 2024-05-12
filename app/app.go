@@ -295,28 +295,29 @@ func (a *App) RegisteGrpcService(desc *grpc.ServiceDesc, s any) {
 
 func (a *App) loadH1Handler() {
 	slog.Info(" initHTTPMux ")
-	var hander http.Handler
-	hander = a.httpmux
+	var h http.Handler
+	h = a.httpmux
+
 	if a.options.enableGRPCWeb {
 		wrappedGrpc := grpcweb.WrapServer(a.rpc)
-		hander = http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		h = http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 			if wrappedGrpc.IsGrpcWebRequest(req) {
 				wrappedGrpc.ServeHTTP(resp, req)
 				return
 			}
 			// Fall back to other servers.
-			hander.ServeHTTP(resp, req)
+			a.httpmux.ServeHTTP(resp, req)
 		})
 
 	}
 	if a.options.corsOptions != nil {
-		hander = cors.New(*a.options.corsOptions).Handler(hander)
+		h = cors.New(*a.options.corsOptions).Handler(h)
 	}
 	// recovery log metric hander
 	n := negroni.New(negroni.NewRecovery(), negroni.NewLogger())
 	p := negroniprometheus.NewMiddleware("app")
 	n = n.With(p)
-	n.UseHandler(hander)
+	n.UseHandler(h)
 	a.h1.Handler = n
 }
 
