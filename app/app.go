@@ -9,15 +9,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
 	"github.com/soheilhy/cmux"
-	"github.com/urfave/negroni"
-	negroniprometheus "github.com/zbindenren/negroni-prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -39,6 +40,12 @@ type TLSConfig struct {
 	CertPath string
 }
 
+type SLogConfig struct {
+	Level      slog.Level
+	JSONOutPut bool
+	AddSource  bool
+}
+
 type AppOptions struct {
 	// if nil not run tls
 	httptls *TLSConfig
@@ -50,6 +57,8 @@ type AppOptions struct {
 	corsOptions *cors.Options
 
 	prom *Addr
+
+	slog *SLogConfig
 }
 
 type AppOption func(aos *AppOptions)
@@ -84,6 +93,12 @@ func WithCorsOptions(opt *cors.Options) AppOption {
 	}
 }
 
+func WithSlogConfig(l *SLogConfig) AppOption {
+	return func(aos *AppOptions) {
+		aos.slog = l
+	}
+}
+
 type App struct {
 	options    *AppOptions
 	bothTCPTLS net.Listener
@@ -94,6 +109,7 @@ type App struct {
 	wg         sync.WaitGroup
 	mList      []cmux.CMux
 	httpmux    *http.ServeMux
+	prom       *http.Server
 }
 
 func New(options ...AppOption) *App {
@@ -167,7 +183,7 @@ func (a *App) listens() {
 }
 
 func (a *App) startServe(l net.Listener) {
-	slog.Info(" server ", "listen", l.Addr())
+	slog.Info("server ", "listen", l.Addr())
 	m := cmux.New(l)
 	httpL := m.Match(cmux.HTTP1Fast())
 	grpcL := m.MatchWithWriters(
@@ -193,12 +209,13 @@ func (a *App) startServe(l net.Listener) {
 		if err := m.Serve(); err != nil {
 			slog.Error("cmux stop", "error", err)
 		}
+
 	}()
 	a.mList = append(a.mList, m)
 }
 
 func (a *App) start() {
-	slog.Info("mux ")
+	slog.Info("listen mux")
 	if a.bothTCPTLS != nil {
 		m := cmux.New(a.bothTCPTLS)
 		grpcL := m.MatchWithWriters(
@@ -225,22 +242,27 @@ func (a *App) start() {
 		go func() {
 			defer a.wg.Done()
 			a.h1.Serve(httpL)
+
 		}()
 		go func() {
 			defer a.wg.Done()
 			a.rpc.Serve(grpcL)
+
 		}()
 		go func() {
 			defer a.wg.Done()
 			a.h1.Serve(httpsL)
+
 		}()
 		go func() {
 			defer a.wg.Done()
 			a.rpc.Serve(grpcsL)
+
 		}()
 		go func() {
 			defer a.wg.Done()
 			tlsm.Serve()
+
 		}()
 		go func() {
 			defer a.wg.Done()
@@ -262,15 +284,31 @@ func (a *App) runProm() {
 	if a.options.prom != nil {
 		met := http.NewServeMux()
 		met.Handle("GET /metrics", promhttp.Handler())
+		a.prom = &http.Server{Addr: a.options.prom.String(), Handler: met}
+		a.wg.Add(1)
 		go func() {
-			if err := http.ListenAndServe(a.options.prom.String(), met); err != nil {
+			defer a.wg.Done()
+			if err := a.prom.ListenAndServe(); err != nil {
 				slog.Error("run metrics server error", "error", err)
 			}
 		}()
 	}
 }
-
+func (a *App) configDefaultSlog() {
+	if a.options.slog != nil {
+		opt := &slog.HandlerOptions{
+			AddSource: a.options.slog.AddSource,
+			Level:     a.options.slog.Level,
+		}
+		if a.options.slog.JSONOutPut {
+			slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, opt)))
+		} else {
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opt)))
+		}
+	}
+}
 func (a *App) Run() {
+	a.configDefaultSlog()
 	slog.Info("start server")
 	a.listens()
 	a.loadH1Handler()
@@ -282,9 +320,11 @@ func (a *App) Run() {
 	<-ch
 	a.h1.Shutdown(context.Background())
 	a.rpc.GracefulStop()
+	a.prom.Shutdown(context.Background())
 	for _, v := range a.mList {
 		v.Close()
 	}
+
 	slog.Info("finish server")
 	a.wg.Wait()
 }
@@ -294,7 +334,7 @@ func (a *App) RegisteGrpcService(desc *grpc.ServiceDesc, s any) {
 }
 
 func (a *App) loadH1Handler() {
-	slog.Info(" initHTTPMux ")
+	slog.Info("initHTTPMux")
 	var h http.Handler
 	h = a.httpmux
 
@@ -314,11 +354,9 @@ func (a *App) loadH1Handler() {
 		h = cors.New(*a.options.corsOptions).Handler(h)
 	}
 	// recovery log metric hander
-	n := negroni.New(negroni.NewRecovery(), negroni.NewLogger())
-	p := negroniprometheus.NewMiddleware("app")
-	n = n.With(p)
-	n.UseHandler(h)
-	a.h1.Handler = n
+	mm := RecoveryMiddle(LogMidddle(MetricMiddle("app").Hander(h)))
+
+	a.h1.Handler = mm
 }
 
 func (a *App) GET(path string, h http.Handler) {
@@ -340,3 +378,96 @@ func (a *App) DELETE(path string, h http.Handler) {
 func (a *App) HEAD(path string, h http.Handler) {
 	a.httpmux.Handle("HEAD "+path, h)
 }
+
+type Middleware func(h http.Handler) http.Handler
+
+var RecoveryMiddle = func(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				stack := make([]byte, 1024*8)
+				stack = stack[:runtime.Stack(stack, false)]
+				slog.ErrorContext(r.Context(), "panic",
+					slog.String("path", r.URL.Path),
+					slog.Any("error", err),
+					slog.Any("stack", stack),
+				)
+			}
+		}()
+
+		h.ServeHTTP(w, r)
+
+	})
+}
+
+var LogMidddle = func(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		re := &StatusRecorder{ResponseWriter: w}
+		h.ServeHTTP(re, r)
+
+		slog.InfoContext(
+			r.Context(),
+			"http request",
+			slog.Int("status", re.Status),
+			slog.String("duration", time.Since(start).String()),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+		)
+	})
+}
+
+type StatusRecorder struct {
+	http.ResponseWriter
+	Status int
+}
+
+func (r *StatusRecorder) WriteHeader(status int) {
+	r.Status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+type PromMiddleWare struct {
+	reqs    *prometheus.CounterVec
+	latency *prometheus.HistogramVec
+}
+
+// NewMiddleware returns a new prometheus Middleware handler.
+func MetricMiddle(name string, buckets ...float64) *PromMiddleWare {
+	var m PromMiddleWare
+	m.reqs = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "http_requests_total",
+			Help:        "How many HTTP requests processed, partitioned by status code, method and HTTP path.",
+			ConstLabels: prometheus.Labels{"service": name},
+		},
+		[]string{"code", "method", "path"},
+	)
+	prometheus.MustRegister(m.reqs)
+
+	if len(buckets) == 0 {
+		buckets = []float64{300, 1200, 5000}
+	}
+	m.latency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:        "http_request_duration_milliseconds",
+		Help:        "How long it took to process the request, partitioned by status code, method and HTTP path.",
+		ConstLabels: prometheus.Labels{"service": name},
+		Buckets:     buckets,
+	},
+		[]string{"code", "method", "path"},
+	)
+	prometheus.MustRegister(m.latency)
+	return &m
+}
+
+func (m *PromMiddleWare) Hander(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		re := &StatusRecorder{ResponseWriter: w}
+		h.ServeHTTP(re, r)
+		m.reqs.WithLabelValues(http.StatusText(re.Status), r.Method, r.URL.Path).Inc()
+		m.latency.WithLabelValues(http.StatusText(re.Status), r.Method, r.URL.Path).Observe(float64(time.Since(start).Nanoseconds()) / 1000000)
+	})
+}
+
