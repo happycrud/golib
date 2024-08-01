@@ -189,13 +189,14 @@ func (a *App) startServe(l net.Listener) {
 	grpcL := m.MatchWithWriters(
 		cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"),
 	)
-	a.wg.Add(3)
+	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		if err := a.rpc.Serve(grpcL); err != nil {
 			slog.Error("grpc stop", "error", err)
 		}
 	}()
+	a.wg.Add(1)
 
 	go func() {
 		defer a.wg.Done()
@@ -203,6 +204,7 @@ func (a *App) startServe(l net.Listener) {
 			slog.Error("h1 stop", "error", err)
 		}
 	}()
+	a.wg.Add(1)
 
 	go func() {
 		defer a.wg.Done()
@@ -238,32 +240,42 @@ func (a *App) start() {
 		)
 		httpsL := tlsm.Match(cmux.HTTP1Fast())
 
-		a.wg.Add(6)
+		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
 			a.h1.Serve(httpL)
 
 		}()
+		a.wg.Add(1)
+
 		go func() {
 			defer a.wg.Done()
 			a.rpc.Serve(grpcL)
 
 		}()
+		a.wg.Add(1)
+
 		go func() {
 			defer a.wg.Done()
 			a.h1.Serve(httpsL)
 
 		}()
+		a.wg.Add(1)
+
 		go func() {
 			defer a.wg.Done()
 			a.rpc.Serve(grpcsL)
 
 		}()
+		a.wg.Add(1)
+
 		go func() {
 			defer a.wg.Done()
 			tlsm.Serve()
 
 		}()
+		a.wg.Add(1)
+
 		go func() {
 			defer a.wg.Done()
 			m.Serve()
@@ -294,6 +306,7 @@ func (a *App) runProm() {
 		}()
 	}
 }
+
 func (a *App) configDefaultSlog() {
 	if a.options.slog != nil {
 		opt := &slog.HandlerOptions{
@@ -307,6 +320,7 @@ func (a *App) configDefaultSlog() {
 		}
 	}
 }
+
 func (a *App) Run() {
 	a.configDefaultSlog()
 	slog.Info("start server")
@@ -354,35 +368,35 @@ func (a *App) loadH1Handler() {
 		h = cors.New(*a.options.corsOptions).Handler(h)
 	}
 	// recovery log metric hander
-	mm := RecoveryMiddle(LogMidddle(MetricMiddle("app").Hander(h)))
+	mm := RecoveryMiddle(LogMidddle(MetricMiddle("app").Hander(h.ServeHTTP)))
 
 	a.h1.Handler = mm
 }
 
-func (a *App) GET(path string, h http.Handler) {
-	a.httpmux.Handle("GET "+path, h)
+func (a *App) GET(path string, h http.HandlerFunc) {
+	a.httpmux.HandleFunc("GET "+path, h)
 }
 
-func (a *App) POST(path string, h http.Handler) {
-	a.httpmux.Handle("POST "+path, h)
+func (a *App) POST(path string, h http.HandlerFunc) {
+	a.httpmux.HandleFunc("POST "+path, h)
 }
 
-func (a *App) PUT(path string, h http.Handler) {
-	a.httpmux.Handle("PUT "+path, h)
+func (a *App) PUT(path string, h http.HandlerFunc) {
+	a.httpmux.HandleFunc("PUT "+path, h)
 }
 
-func (a *App) DELETE(path string, h http.Handler) {
-	a.httpmux.Handle("DELETE "+path, h)
+func (a *App) DELETE(path string, h http.HandlerFunc) {
+	a.httpmux.HandleFunc("DELETE "+path, h)
 }
 
-func (a *App) HEAD(path string, h http.Handler) {
-	a.httpmux.Handle("HEAD "+path, h)
+func (a *App) HEAD(path string, h http.HandlerFunc) {
+	a.httpmux.HandleFunc("HEAD "+path, h)
 }
 
-type Middleware func(h http.Handler) http.Handler
+type Middleware func(h http.HandlerFunc) http.HandlerFunc
 
-var RecoveryMiddle = func(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+var RecoveryMiddle = func(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -395,14 +409,12 @@ var RecoveryMiddle = func(h http.Handler) http.Handler {
 				)
 			}
 		}()
-
 		h.ServeHTTP(w, r)
-
-	})
+	}
 }
 
-var LogMidddle = func(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+var LogMidddle = func(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		re := &StatusRecorder{ResponseWriter: w}
 		h.ServeHTTP(re, r)
@@ -415,7 +427,7 @@ var LogMidddle = func(h http.Handler) http.Handler {
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 		)
-	})
+	}
 }
 
 type StatusRecorder struct {
@@ -461,13 +473,12 @@ func MetricMiddle(name string, buckets ...float64) *PromMiddleWare {
 	return &m
 }
 
-func (m *PromMiddleWare) Hander(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (m *PromMiddleWare) Hander(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		re := &StatusRecorder{ResponseWriter: w}
 		h.ServeHTTP(re, r)
 		m.reqs.WithLabelValues(http.StatusText(re.Status), r.Method, r.URL.Path).Inc()
 		m.latency.WithLabelValues(http.StatusText(re.Status), r.Method, r.URL.Path).Observe(float64(time.Since(start).Nanoseconds()) / 1000000)
-	})
+	}
 }
-
