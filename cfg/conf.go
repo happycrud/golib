@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
+	"log/slog"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +26,12 @@ func Config() *Configs {
 	return configFn()
 }
 
-var configFn = sync.OnceValue[*Configs](initConfig)
+var configFn = sync.OnceValue(initConfig)
+
+type FileContentPipe struct {
+	RawContent     []byte
+	RawContentPipe chan []byte
+}
 
 func initConfig() *Configs {
 	if confPath == "" {
@@ -36,19 +41,22 @@ func initConfig() *Configs {
 	if err != nil {
 		panic(err)
 	}
-	x := make(map[string][]byte)
+	x := make(map[string]*FileContentPipe)
 	for _, f := range files {
-		data, err := os.ReadFile(path.Join(confPath, f.Name()))
+		data, err := os.ReadFile(filepath.Join(confPath, f.Name()))
 		if err != nil {
 			panic(err)
 		}
-		x[f.Name()] = data
+		x[f.Name()] = &FileContentPipe{RawContent: data}
 
 	}
 	at := atomic.Value{}
 	at.Store(x)
 	wc, err := fsnotify.NewWatcher()
 	if err != nil {
+		panic(err)
+	}
+	if err := wc.Add(confPath); err != nil {
 		panic(err)
 	}
 	ret := &Configs{
@@ -62,6 +70,7 @@ func initConfig() *Configs {
 }
 
 type EventFn func(event *fsnotify.Event)
+
 type Configs struct {
 	// config dir path
 	dir string
@@ -90,29 +99,43 @@ func (c *Configs) UnmarshalTo(key string, object interface{}) error {
 		}
 		return errors.New("not support config file format")
 	}
-
 }
 
-func (c *Configs) Watch(key string) error {
-	if _, ok := c.Raw(key); !ok {
-		return errors.New("key is not exist")
+func (c *Configs) Watch(key string) (chan []byte, error) {
+	var f *FileContentPipe
+	var ok bool
+	if f, ok = c.Content(key); !ok {
+		return nil, errors.New("key is not exist")
 	}
-	return c.fsWatcher.Add(path.Join(c.dir, key))
+	f.RawContentPipe = make(chan []byte)
+	return f.RawContentPipe, nil
 }
 
 func (c *Configs) Raw(key string) ([]byte, bool) {
-	v := c.filesRW.Load().(map[string][]byte)
-	d, x := v[key]
-	return d, x
-}
-func (c *Configs) RawString(key string) (string, bool) {
-	v := c.filesRW.Load().(map[string][]byte)
-	d, x := v[key]
+	d, x := c.Content(key)
 	if x {
-		return string(d), x
+		return d.RawContent, x
 	}
-	return "", x
+	return nil, false
 }
+
+func (c *Configs) RawString(key string) (string, bool) {
+	d, x := c.Content(key)
+	if x {
+		return string(d.RawContent), x
+	}
+	return "", false
+}
+
+func (c *Configs) Content(key string) (*FileContentPipe, bool) {
+	v := c.filesRW.Load().(map[string]*FileContentPipe)
+	f, ok := v[key]
+	if ok {
+		return f, ok
+	}
+	return nil, false
+}
+
 func (c *Configs) watch() {
 	for {
 		select {
@@ -120,27 +143,31 @@ func (c *Configs) watch() {
 			if !ok {
 				return
 			}
-
 			if event.Has(fsnotify.Write) {
 				// read file name
-				f, err := os.ReadFile(event.Name)
+				content, err := os.ReadFile(event.Name)
 				if err != nil {
-					panic(err)
+					slog.Error("readfile", "error", err.Error())
+					continue
 				}
-				v := c.filesRW.Load().(map[string][]byte)
-				_, n := path.Split(event.Name)
-				v[n] = f
-				c.filesRW.Store(v)
+				final := filepath.Base(event.Name)
+				v, ok := c.filesRW.Load().(map[string]*FileContentPipe)
+				if ok {
+					ff, ok2 := v[final]
+					if ok2 {
+						ff.RawContent = content
+						if ff.RawContentPipe != nil {
+							ff.RawContentPipe <- content
+						}
+					}
+				}
 			}
 
 		case e, ok := <-c.fsWatcher.Errors:
 			if !ok {
-				fmt.Println(e)
 				return
 			}
-
+			slog.Error("watch file", "error", e.Error())
 		}
-
 	}
-
 }
