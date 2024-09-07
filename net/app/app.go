@@ -9,13 +9,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
 	"github.com/soheilhy/cmux"
@@ -23,6 +20,8 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+
+	h1 "github.com/happycrud/golib/net/http"
 )
 
 type Addr struct {
@@ -211,7 +210,6 @@ func (a *App) startServe(l net.Listener) {
 		if err := m.Serve(); err != nil {
 			slog.Error("cmux stop", "error", err)
 		}
-
 	}()
 	a.mList = append(a.mList, m)
 }
@@ -244,35 +242,30 @@ func (a *App) start() {
 		go func() {
 			defer a.wg.Done()
 			a.h1.Serve(httpL)
-
 		}()
 		a.wg.Add(1)
 
 		go func() {
 			defer a.wg.Done()
 			a.rpc.Serve(grpcL)
-
 		}()
 		a.wg.Add(1)
 
 		go func() {
 			defer a.wg.Done()
 			a.h1.Serve(httpsL)
-
 		}()
 		a.wg.Add(1)
 
 		go func() {
 			defer a.wg.Done()
 			a.rpc.Serve(grpcsL)
-
 		}()
 		a.wg.Add(1)
 
 		go func() {
 			defer a.wg.Done()
 			tlsm.Serve()
-
 		}()
 		a.wg.Add(1)
 
@@ -368,7 +361,7 @@ func (a *App) loadH1Handler() {
 		h = cors.New(*a.options.corsOptions).Handler(h)
 	}
 	// recovery log metric hander
-	mm := RecoveryMiddle(LogMidddle(MetricMiddle("app").Hander(h.ServeHTTP)))
+	mm := h1.RecoveryMiddle(h1.LogMidddle(h1.MetricMiddle("app").Hander(h.ServeHTTP)))
 
 	a.h1.Handler = mm
 }
@@ -391,94 +384,4 @@ func (a *App) DELETE(path string, h http.HandlerFunc) {
 
 func (a *App) HEAD(path string, h http.HandlerFunc) {
 	a.httpmux.HandleFunc("HEAD "+path, h)
-}
-
-type Middleware func(h http.HandlerFunc) http.HandlerFunc
-
-var RecoveryMiddle = func(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if err := recover(); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				stack := make([]byte, 1024*8)
-				stack = stack[:runtime.Stack(stack, false)]
-				slog.ErrorContext(r.Context(), "panic",
-					slog.String("path", r.URL.Path),
-					slog.Any("error", err),
-					slog.Any("stack", stack),
-				)
-			}
-		}()
-		h.ServeHTTP(w, r)
-	}
-}
-
-var LogMidddle = func(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		re := &StatusRecorder{ResponseWriter: w}
-		h.ServeHTTP(re, r)
-
-		slog.InfoContext(
-			r.Context(),
-			"http request",
-			slog.Int("status", re.Status),
-			slog.String("duration", time.Since(start).String()),
-			slog.String("method", r.Method),
-			slog.String("path", r.URL.Path),
-		)
-	}
-}
-
-type StatusRecorder struct {
-	http.ResponseWriter
-	Status int
-}
-
-func (r *StatusRecorder) WriteHeader(status int) {
-	r.Status = status
-	r.ResponseWriter.WriteHeader(status)
-}
-
-type PromMiddleWare struct {
-	reqs    *prometheus.CounterVec
-	latency *prometheus.HistogramVec
-}
-
-// NewMiddleware returns a new prometheus Middleware handler.
-func MetricMiddle(name string, buckets ...float64) *PromMiddleWare {
-	var m PromMiddleWare
-	m.reqs = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "http_requests_total",
-			Help:        "How many HTTP requests processed, partitioned by status code, method and HTTP path.",
-			ConstLabels: prometheus.Labels{"service": name},
-		},
-		[]string{"code", "method", "path"},
-	)
-	prometheus.MustRegister(m.reqs)
-
-	if len(buckets) == 0 {
-		buckets = []float64{300, 1200, 5000}
-	}
-	m.latency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:        "http_request_duration_milliseconds",
-		Help:        "How long it took to process the request, partitioned by status code, method and HTTP path.",
-		ConstLabels: prometheus.Labels{"service": name},
-		Buckets:     buckets,
-	},
-		[]string{"code", "method", "path"},
-	)
-	prometheus.MustRegister(m.latency)
-	return &m
-}
-
-func (m *PromMiddleWare) Hander(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		re := &StatusRecorder{ResponseWriter: w}
-		h.ServeHTTP(re, r)
-		m.reqs.WithLabelValues(http.StatusText(re.Status), r.Method, r.URL.Path).Inc()
-		m.latency.WithLabelValues(http.StatusText(re.Status), r.Method, r.URL.Path).Observe(float64(time.Since(start).Nanoseconds()) / 1000000)
-	}
 }

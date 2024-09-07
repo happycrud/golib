@@ -17,8 +17,12 @@ func main() {
 	fmt.Println(cf.RawString("oo.json"))
 	fmt.Println(cf.RawString("oo.toml"))
 	fmt.Println(cf.RawString("oo.yml"))
-	if err := cf.Watch("oo.json"); err != nil {
+	if ch, err := cf.Watch("oo.json"); err != nil {
 		panic(err)
+	} else {
+		for x := range ch {
+			fmt.Println(string(x))
+		}
 	}
 	x := &Demo{}
 	cf.UnmarshalTo("oo.json", x)
