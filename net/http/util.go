@@ -8,7 +8,12 @@ import (
 	"sync"
 
 	form "github.com/go-playground/form/v4"
+	"github.com/go-playground/validator/v10"
 )
+
+var Validator = sync.OnceValue(func() *validator.Validate {
+	return validator.New(validator.WithRequiredStructEnabled())
+})
 
 var FormParser = sync.OnceValue(func() *form.Decoder {
 	return form.NewDecoder()
