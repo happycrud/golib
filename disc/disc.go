@@ -2,15 +2,15 @@ package disc
 
 import (
 	"fmt"
-
 	"os"
 	"sync"
 
-	"github.com/happycrud/golib/pjson"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/naming/resolver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/happycrud/golib/net/rpc/pjson"
 )
 
 var clientFn = sync.OnceValue[*clientv3.Client](initEc)
@@ -18,6 +18,7 @@ var clientFn = sync.OnceValue[*clientv3.Client](initEc)
 func GetEc() *clientv3.Client {
 	return clientFn()
 }
+
 func initEc() *clientv3.Client {
 	addr := os.Getenv("ETCD_ADDRESS")
 	if addr == "" {

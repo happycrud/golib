@@ -1,0 +1,50 @@
+package ui 
+
+import "github.com/happycrud/golib/net/http"
+import "fmt"
+
+templ PaginationView(title, urlprefix string, p *http.Paginator) {
+	<div id={ fmt.Sprintf("%s_list_page", title) } class="flex flex-col">
+		<div id={ fmt.Sprintf("%s_list", title) } class="flex-1 gap-2 ">
+			{ children... }
+		</div>
+		<div class="flex flex-row justify-center my-10">
+			<div class="flex-none"></div>
+			<div class="flex join ">
+				<div
+					hx-boost="true"
+					hx-get={ urlprefix + fmt.Sprintf("page=%d", p.Pre) }
+					hx-target={ fmt.Sprintf("#%s_list_page", title) }
+					hx-swap="outerHTML"
+					class="join-item btn"
+				>
+					pre
+				</div>
+				for _,v := range p.Pages {
+					<div
+						hx-boost="true"
+						hx-get={ urlprefix + fmt.Sprintf("page=%d", v) }
+						hx-target={ fmt.Sprintf("#%s_list_page", title) }
+						hx-swap="outerHTML"
+						if v == p.CurrentPage {
+							class="join-item btn btn-primary"
+						} else {
+							class="join-item btn "
+						}
+					>
+						{ fmt.Sprintf("%d",v) }
+					</div>
+				}
+				<div
+					hx-boost="true"
+					hx-get={ urlprefix + fmt.Sprintf("page=%d", p.Next) }
+					hx-target={ fmt.Sprintf("#%s_list_page", title) }
+					hx-swap="outerHTML"
+					class="join-item btn"
+				>
+					next
+				</div>
+			</div>
+		</div>
+	</div>
+}

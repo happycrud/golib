@@ -4,23 +4,19 @@ import (
 	"context"
 	"flag"
 	"fmt"
-
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
-	pb "github.com/happycrud/golib/demo/helloworld/helloworld"
-
-	"github.com/happycrud/golib/disc"
-	_ "github.com/happycrud/golib/pjson"
 	"google.golang.org/grpc"
+
+	pb "github.com/happycrud/golib/demo/helloworld/helloworld"
+	"github.com/happycrud/golib/disc"
 )
 
-var (
-	port = flag.Int("port", 50051, "The server port")
-)
+var port = flag.Int("port", 50051, "The server port")
 
 // server is used to implement helloworld.GreeterServer.
 type server struct {
@@ -46,7 +42,6 @@ func main() {
 	pb.RegisterGreeterServer(s, &server{})
 	log.Printf("server listening at %v", lis.Addr())
 	err = si.Register()
-
 	if err != nil {
 		panic(err)
 	}
@@ -62,7 +57,7 @@ func main() {
 		s := <-c
 		switch s {
 		case syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT:
-			//discovery.DeleteRegister(context.Background(), instanceID)
+			// discovery.DeleteRegister(context.Background(), instanceID)
 			si.Deregister()
 			return
 		case syscall.SIGHUP:

@@ -4,14 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-
 	"log"
 	"time"
 
 	pb "github.com/happycrud/golib/demo/helloworld/helloworld"
-
 	"github.com/happycrud/golib/disc"
-	"github.com/happycrud/golib/pjsonc"
+	"github.com/happycrud/golib/net/rpc/pjsonc"
 )
 
 const (

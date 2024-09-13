@@ -6,7 +6,7 @@ import (
 
 	"github.com/rs/cors"
 
-	"github.com/happycrud/golib/app"
+	"github.com/happycrud/golib/net/app"
 )
 
 func main() {

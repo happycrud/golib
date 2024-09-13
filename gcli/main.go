@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"flag"
-
 	"log"
 	"time"
 
-	"github.com/happycrud/golib/pjsonc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/happycrud/golib/net/rpc/pjsonc"
 )
 
 var (
@@ -35,5 +35,4 @@ func main() {
 		panic(err)
 	}
 	log.Printf("response: %+v", resp.Data)
-
 }
